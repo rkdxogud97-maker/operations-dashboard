@@ -31,6 +31,7 @@ input,button,select,textarea{font-family:inherit}
 .btn-del:hover{background:#FFF0F0!important;color:#FB3B3B!important;border-color:#FAD4D4!important}
 .btn-border:hover{border-color:#FF6B4A!important;color:#E0532F!important}
 .notif-row:hover{background:#F7F8FA}
+.ms-row:hover{border-color:#B9CEF5!important;box-shadow:0 2px 10px -4px rgba(45,108,223,.25)}
 .more-btn:hover{border-color:#FF6B4A!important;color:#E0532F!important;background:#FFF7F4!important}
 .cap-drop:hover{border-color:#FF6B4A!important;background:#FFF6F3!important}
 .tab-btn:hover{color:#1C212B!important}
@@ -702,10 +703,16 @@ ${msLines.length?msLines.join('\n'):'(없음)'}
   const zoneDefs=[
     {id:'today',label:'오늘 · 지난 마감',en:'TODAY · OVERDUE',accent:'#FB3B3B',tasks:active.filter(t=>t.dday<=0),emptyText:'지난·오늘 마감 업무가 없습니다.',highlight:true},
     {id:'week', label:'이번 주',en:'THIS WEEK',accent:'#FF6B4A',tasks:active.filter(t=>t.dday>=1&&t.dday<=7),emptyText:'이번 주 도래 업무가 없습니다.'},
-    {id:'month',label:'이번 달',en:'THIS MONTH',accent:'#F0A52A',tasks:active.filter(t=>t.dday>=8&&t.dday<=31),emptyText:'이번 달 도래 업무가 없습니다.'},
-    {id:'soon', label:'곧 도래', en:'UPCOMING',  accent:'#8A929E',tasks:active.filter(t=>t.dday>31),emptyText:'예정된 업무가 없습니다.'},
+    {id:'month',label:'이번 달 이후',en:'AHEAD',accent:'#F0A52A',tasks:active.filter(t=>t.dday>=8),emptyText:'다가오는 업무가 없습니다.'},
   ];
   const projects=(s.projects||[]).map(enrichProject);
+  // 4번째 칸: 다가오는 프로젝트 마일스톤 (미완료, 날짜순)
+  const msAccent='#2D6CDF';
+  const upcomingMsCol=[];
+  projects.forEach(p=>p.milestones.forEach(m=>{
+    if(!m.done) upcomingMsCol.push({name:m.name,projectName:p.name,proj:p,dateLabel:m.dateLabel,ddayText:m.ddayText,ddayColor:m.ddayColor,_dd:ddayOf(m.date)});
+  }));
+  upcomingMsCol.sort((a,b)=>a._dd-b._dd);
   const overdue=active.filter(t=>t.dday<0).map(t=>({name:t.name,sub:t.chipLabel+' · 기한 '+t.dateLabel,dday:t.ddayText}));
   const todayDueList=active.filter(t=>t.dday===0).map(t=>({name:t.name,sub:t.chipLabel+' · 오늘 마감'}));
   const upcomingMs=[];
@@ -928,6 +935,56 @@ ${msLines.length?msLines.join('\n'):'(없음)'}
                 </section>
               );
             })}
+
+            {/* 4번째 칸 — 다가오는 마일스톤 */}
+            {(()=>{
+              const col=hero?'span 4':'span 3';
+              const isOpen=!!s.expanded.ms;
+              const visible=isOpen?upcomingMsCol:upcomingMsCol.slice(0,COLLAPSE_N);
+              const hidden=upcomingMsCol.length-visible.length;
+              const showMore=upcomingMsCol.length>COLLAPSE_N;
+              return (
+                <section style={{gridColumn:col,background:'#FBFBFC',border:'1px solid #EEF0F3',borderRadius:16,padding:'16px 16px 8px',minHeight:120}}>
+                  <div style={{display:'flex',alignItems:'center',gap:9,padding:'2px 4px 14px'}}>
+                    <span style={{width:9,height:9,borderRadius:3,background:msAccent,flexShrink:0}}></span>
+                    <span style={{fontSize:15,fontWeight:700,letterSpacing:-.2,color:'#1C212B'}}>다가오는 마일스톤</span>
+                    <span style={{fontSize:10.5,fontWeight:700,letterSpacing:.6,color:'#B6BCC6'}}>MILESTONES</span>
+                    <span style={{marginLeft:'auto',minWidth:22,height:22,padding:'0 7px',borderRadius:7,background:'#E7EEFB',color:msAccent,fontSize:12,fontWeight:700,display:'flex',alignItems:'center',justifyContent:'center'}}>{upcomingMsCol.length}</span>
+                  </div>
+                  <div style={{display:'flex',flexDirection:'column',gap:9,maxHeight:'calc(100vh - 236px)',overflowY:'auto',overflowX:'hidden',paddingRight:2,paddingBottom:8}}>
+                    {upcomingMsCol.length===0?(
+                      <div style={{padding:'22px 8px 28px',textAlign:'center'}}>
+                        <div style={{width:42,height:42,margin:'0 auto 10px',borderRadius:12,border:'1.5px dashed #D9DDE3',display:'flex',alignItems:'center',justifyContent:'center',color:'#C4C9D1'}}>
+                          <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round"><path d="M12 2v6M12 22v-6M4.9 4.9l4.2 4.2M14.9 14.9l4.2 4.2M2 12h6M22 12h-6"/></svg>
+                        </div>
+                        <div style={{fontSize:12.5,color:'#A4ABB5',lineHeight:1.5}}>다가오는 마일스톤이 없습니다.<br/>중장기 관리에서 추가하세요.</div>
+                      </div>
+                    ):visible.map((m,i)=>(
+                      <button key={i} onClick={()=>openManage(m.proj)} className="ms-row" style={{textAlign:'left',width:'100%',display:'block',background:'#fff',border:'1px solid #ECEEF1',borderRadius:12,padding:'11px 13px',cursor:'pointer',transition:'border-color .12s,box-shadow .12s'}}>
+                        <div style={{display:'flex',alignItems:'flex-start',justifyContent:'space-between',gap:10}}>
+                          <div style={{minWidth:0,flex:1}}>
+                            <div style={{fontSize:13.5,fontWeight:600,color:'#1C212B',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{m.name}</div>
+                            <div style={{display:'flex',alignItems:'center',gap:5,marginTop:4,minWidth:0}}>
+                              <span style={{width:6,height:6,borderRadius:2,background:msAccent,flexShrink:0}}></span>
+                              <span style={{fontSize:11.5,color:'#8A929E',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{m.projectName}</span>
+                            </div>
+                          </div>
+                          <div style={{textAlign:'right',flexShrink:0}}>
+                            <div style={{fontSize:13,fontWeight:700,color:m.ddayColor}}>{m.ddayText}</div>
+                            <div style={{fontSize:11,color:'#9AA2AD',marginTop:2}}>{m.dateLabel}</div>
+                          </div>
+                        </div>
+                      </button>
+                    ))}
+                    {showMore&&(
+                      <button className="more-btn" onClick={()=>upd(p=>({expanded:{...p.expanded,ms:!p.expanded.ms}}))} style={{height:38,borderRadius:10,border:'1px dashed #D9DDE3',background:'#fff',color:'#5B6472',fontSize:12.5,fontWeight:700,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',gap:6,transition:'all .12s'}}>
+                        {isOpen?'접기':`+${hidden}건 더 보기`}
+                      </button>
+                    )}
+                  </div>
+                </section>
+              );
+            })()}
           </div>
         </main>
       )}
