@@ -1,25 +1,30 @@
-# CODING AGENTS: READ THIS FIRST
+# 운영 대시보드
 
-This is a **handoff bundle** from Claude Design (claude.ai/design).
+석유화학 운영 엔지니어를 위한 업무·프로젝트 관리 대시보드입니다.
+단일 `index.html` 파일로 동작하는 정적 웹앱이며, 데이터는 Firebase Firestore에 저장됩니다.
 
-A user mocked up designs in HTML/CSS/JS using an AI design tool, then exported this bundle so a coding agent can implement the designs for real.
+## 주요 기능
 
-## What you should do — IMPORTANT
+- **업무 관리** — 1회성/반복 업무 등록, 중요도·기한·진행률 관리
+- **텍스트 붙여넣기 등록** — 보고 텍스트를 붙여넣으면 업무 앞 번호(`1.`, `2.`)를 기준으로 자동 분리하고, `7.2(목)` 형식의 기한을 인식합니다. 중복 업무는 자동 제외됩니다.
+- **프로젝트 추적** — 진행 중인 프로젝트와 마일스톤 관리
+- **마감 임박 알림** — 임계일 기준 데스크톱 알림
+- **실시간 동기화** — Firestore `onSnapshot` 기반 다중 기기 실시간 반영
 
-**Read the chat transcripts first.** There are 1 chat transcript(s) in `chats/`. The transcripts show the full back-and-forth between the user and the design assistant — they tell you **what the user actually wants** and **where they landed** after iterating. Don't skip them. The final HTML files are the output, but the chat is where the intent lives.
+## 기술 구성
 
-**Read `project/운영 대시보드.dc.html` in full.** The user had this file open when they triggered the handoff, so it's almost certainly the primary design they want built. Read it top to bottom — don't skim. Then **follow its imports**: open every file it pulls in (shared components, CSS, scripts) so you understand how the pieces fit together before you start implementing.
+- React 18 (UMD) + Babel Standalone (브라우저 내 JSX 트랜스파일)
+- Firebase Firestore v12 (ESM CDN)
+- Pretendard 한글 폰트
 
-**If anything is ambiguous, ask the user to confirm before you start implementing.** It's much cheaper to clarify scope up front than to build the wrong thing.
+빌드 과정 없이 `index.html`을 브라우저에서 바로 열면 됩니다.
 
-## About the design files
+## Firebase 설정
 
-The design medium is **HTML/CSS/JS** — these are prototypes, not production code. Your job is to **recreate them pixel-perfectly** in whatever technology makes sense for the target codebase (React, Vue, native, whatever fits). Match the visual output; don't copy the prototype's internal structure unless it happens to fit.
+`index.html` 안에 Firebase 웹 설정이 포함되어 있습니다. 웹 `apiKey`는 클라이언트 노출을 전제로 한 식별자이지만, **데이터 보호는 Firestore 보안 규칙으로 해야 합니다.** 공개 배포 시 반드시 Firestore 보안 규칙을 설정하세요.
 
-**Don't render these files in a browser or take screenshots unless the user asks you to.** Everything you need — dimensions, colors, layout rules — is spelled out in the source. Read the HTML and CSS directly; a screenshot won't tell you anything they don't.
+Firestore 컬렉션 구조:
 
-## Bundle contents
-
-- `README.md` — this file
-- `chats/` — conversation transcripts (read these!)
-- `project/` — the `생산관리 운영 대시보드 UI` project files (HTML prototypes, assets, components)
+- `tasks` — 업무 문서
+- `projects` — 프로젝트 문서
+- `settings/main` — 알림 임계일 등 환경 설정
