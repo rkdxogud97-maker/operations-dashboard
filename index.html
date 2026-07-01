@@ -121,8 +121,41 @@ function stripDateMarkers(name){
   });
   // bare tilde-prefixed date "~7.3"
   out=out.replace(/~\s*\d{1,2}\.\d{1,2}(?!\d)/g,' ');
+  // stray double quotes (Teams paste often injects unbalanced ")
+  out=out.replace(/["“”„‟〝〞＂]/g,'');
   return out.replace(/\s+([)）])/g,'$1').replace(/\s{2,}/g,' ').trim();
 }
+
+// ─── Fuzzy duplicate detection ──────────────────────────────────────────────
+// Normalize aggressively: drop parenthetical content, keep only alnum + Hangul.
+function normName(n){
+  return (n||'').replace(/\([^)）]*[)）]/g,'').replace(/[^0-9a-zA-Z가-힣]/g,'').toLowerCase();
+}
+function editDistance(a,b){
+  const m=a.length,n=b.length;
+  if(!m) return n; if(!n) return m;
+  let prev=new Array(n+1); for(let j=0;j<=n;j++) prev[j]=j;
+  for(let i=1;i<=m;i++){
+    const cur=[i];
+    for(let j=1;j<=n;j++) cur[j]=Math.min(prev[j]+1,cur[j-1]+1,prev[j-1]+(a[i-1]===b[j-1]?0:1));
+    prev=cur;
+  }
+  return prev[n];
+}
+// True when two task names likely refer to the same task despite minor differences.
+function sameTask(a,b){
+  const x=normName(a),y=normName(b);
+  if(!x||!y) return false;
+  if(x===y) return true;
+  // Numbers are meaningful discriminators (반응기/공장 번호, 차수) — differing digits ⇒ different task
+  const dx=(x.match(/\d+/g)||[]).join(','), dy=(y.match(/\d+/g)||[]).join(',');
+  if(dx!==dy) return false;
+  const [sh,lo]=x.length<=y.length?[x,y]:[y,x];
+  if(sh.length>=6&&lo.indexOf(sh)!==-1) return true; // one contains the other
+  const ratio=1-editDistance(x,y)/Math.max(x.length,y.length);
+  return ratio>=0.82;
+}
+function findExisting(name,tasks){ return (tasks||[]).find(t=>sameTask(t.name,name)); }
 
 // Strips undefined values (Firestore rejects undefined)
 function cleanDoc(obj){
@@ -142,13 +175,13 @@ function taskToDoc(t){
 // Dates embedded in tasks as "M.D" (e.g. 7.2(목), ~7.2 목, 7.3 14:30~).
 function parseReport(text){
   const year=new Date().getFullYear();
-  const seen=new Set();
   const rows=[];
 
-  // Strip table column headers like "7월 1일(수)" and tabs
+  // Strip table column headers like "7월 1일(수)", tabs, and stray double quotes
   let s=text
     .replace(/\d{1,2}월\s*\d{1,2}일\s*[(（][월화수목금토일][)）]/g,' ')
-    .replace(/\t/g,' ');
+    .replace(/\t/g,' ')
+    .replace(/["“”„‟〝〞＂]/g,' ');
 
   // Split into task segments by tracking parenthesis depth.
   // A task separator is digit(s) + "." + whitespace at depth=0,
@@ -200,10 +233,8 @@ function parseReport(text){
     const name=stripDateMarkers(seg);
     if(!name||name.length<2) return;
 
-    // Dedup key: strip parenthetical content for comparison
-    const key=name.replace(/\([^)）]*[)）]/g,'').replace(/\s+/g,'').toLowerCase();
-    if(!key||seen.has(key)) return;
-    seen.add(key);
+    // Fuzzy dedup within this paste (catches minor wording differences)
+    if(rows.some(r=>sameTask(r.name,name))) return;
 
     rows.push({name,dueIso,hasDate});
   });
@@ -575,13 +606,12 @@ JSON만 출력. 형식: {"tasks":[{"name":string,"due":"YYYY-MM-DD"|null,"done":
       const items=(parsed&&(parsed.tasks||parsed.items))||[];
       if(!items.length){ upd({captureStep:'upload',captureError:'이미지에서 업무를 찾지 못했습니다. 더 선명한 캡처로 다시 시도해 주세요.'}); return; }
       const currentTasks=s.tasks||[];
-      const normKey=n=>(n||'').replace(/\([^)）]*[)）]/g,'').replace(/\s+/g,'').toLowerCase();
       const rows=items.map(it=>{
         const name=(it.name||'').trim();
         const hasDue=it.due&&/^\d{4}-\d{2}-\d{2}$/.test(it.due);
         const dueIso=hasDue?it.due:dateFromOffset(7);
-        const dup=currentTasks.some(t=>normKey(t.name)===normKey(name));
-        return {include:!it.done,name,dueIso,done:!!it.done,memo:(it.memo||'').trim(),
+        const dup=findExisting(name,currentTasks);
+        return {include:!it.done&&!dup,name,dueIso,done:!!it.done,memo:(it.memo||'').trim(),
           confidence:hasDue?'normal':'low',status:dup?'중복(갱신)':'신규',type:'1회성',
           date:hasDue?fmtDate(it.due).slice(0,5):'—'};
       }).filter(r=>r.name);
@@ -757,10 +787,8 @@ JSON만 출력. 형식: {"tasks":[{"name":string,"due":"YYYY-MM-DD"|null,"done":
     if(!s.pasteText.trim()) return;
     const parsed=parseReport(s.pasteText);
     const currentTasks=s.tasks||[];
-    const normKey=n=>n.replace(/\([^)）]*[)）]/g,'').replace(/\s+/g,'').toLowerCase();
     const rows=parsed.map(r=>{
-      const key=normKey(r.name);
-      const dup=currentTasks.some(t=>normKey(t.name)===key);
+      const dup=findExisting(r.name,currentTasks);
       return{name:r.name,dueIso:r.dueIso,confidence:r.hasDate?'normal':'low',status:dup?'중복(갱신)':'신규',include:!dup,type:'1회성'};
     });
     upd({pasteRows:rows,pasteStep:'preview'});
@@ -769,10 +797,8 @@ JSON만 출력. 형식: {"tasks":[{"name":string,"due":"YYYY-MM-DD"|null,"done":
     if(!window.__fb) return;
     const {db,doc,setDoc}=window.__fb;
     const currentTasks=s.tasks||[];
-    const normKey=n=>n.replace(/\([^)）]*[)）]/g,'').replace(/\s+/g,'').toLowerCase();
     s.pasteRows.filter(r=>r.include).forEach(r=>{
-      const key=normKey(r.name);
-      const ex=currentTasks.find(t=>normKey(t.name)===key);
+      const ex=findExisting(r.name,currentTasks);
       if(ex){
         setDoc(doc(db,'tasks',ex.id),taskToDoc({...ex,due:r.dueIso})).catch(console.error);
       } else {
@@ -788,7 +814,7 @@ JSON만 출력. 형식: {"tasks":[{"name":string,"due":"YYYY-MM-DD"|null,"done":
     const {db,doc,setDoc,deleteDoc}=window.__fb;
     const currentTasks=s.tasks||[];
     s.captureRows.filter(r=>r.include).forEach(r=>{
-      const ex=currentTasks.find(t=>t.name===r.name);
+      const ex=findExisting(r.name,currentTasks);
       if(ex){
         if(r.done) deleteDoc(doc(db,'tasks',ex.id)).catch(console.error);
         else setDoc(doc(db,'tasks',ex.id),taskToDoc({...ex,due:r.dueIso})).catch(console.error);
