@@ -66,10 +66,13 @@ const TYPE_CHIP = {
   '1회성': {bg:'#EEF0F3',color:'#5B6472'},
   '매주':  {bg:'#E8F0FE',color:'#2D6CDF'},
   '매월':  {bg:'#F0EAFB',color:'#7A4FD0'},
-  'N일':   {bg:'#E3F4F1',color:'#1F8C7A'},
+  '분기1회':{bg:'#E3F4F1',color:'#1F8C7A'},
+  '반기1회':{bg:'#EAF2E8',color:'#4E8A3C'},
   '연1회': {bg:'#FBF0E0',color:'#B5791A'},
+  'N일':   {bg:'#E3F4F1',color:'#1F8C7A'},
   '중장기':{bg:'#FFEAE3',color:'#E0532F'},
 };
+const TYPE_LABEL = {'분기1회':'분기 1회','반기1회':'반기 1회','연1회':'연 1회'};
 const IMP = {
   high:{c:'#FB3B3B',l:'중요'},
   mid: {c:'#F0A52A',l:'보통'},
@@ -511,7 +514,7 @@ function App(){
     const tasks=(s.tasks||[]).filter(t=>!t.done)
       .map(t=>({...t,_d:ddayOf(t.due)}))
       .sort((a,b)=>a._d-b._d)
-      .map(t=>`- [${IMPL[t.importance]||'보통'}] ${t.name} (${t.type||'1회성'}, 기한 ${fmtDate(t.due)}, ${ddayPhrase(t.due)})`);
+      .map(t=>`- [${IMPL[t.importance]||'보통'}] ${t.name} (${TYPE_LABEL[t.type]||t.type||'1회성'}, 기한 ${fmtDate(t.due)}, ${ddayPhrase(t.due)})`);
     const ms=[];
     (s.projects||[]).forEach(p=>(p.milestones||[]).forEach(m=>{
       if(!m.done) ms.push({...m,project:p.name,_d:ddayOf(m.date)});
@@ -641,7 +644,7 @@ JSON만 출력. 형식: {"tasks":[{"name":string,"due":"YYYY-MM-DD"|null,"done":
     const chip=TYPE_CHIP[t.type]||TYPE_CHIP['1회성'];
     const imp=IMP[t.importance]||IMP.mid;
     const ddayBig=s.dDayStyle==='대형숫자';
-    const chipLabel=t.type==='N일'?(t.cycle||30)+'일 주기':(t.type==='연1회'?'연 1회':t.type);
+    const chipLabel=t.type==='N일'?(t.cycle||30)+'일 주기':(TYPE_LABEL[t.type]||t.type);
     return{...t,dday,ddayText,ddayColor,
       chipBg:chip.bg,chipColor:chip.color,chipLabel,
       impColor:imp.c,impLabel:imp.l,
@@ -680,7 +683,7 @@ JSON만 출력. 형식: {"tasks":[{"name":string,"due":"YYYY-MM-DD"|null,"done":
   function completeTask(id){
     if(!window.__fb) return;
     const {db,doc,setDoc}=window.__fb;
-    const repeat={'매주':7,'매월':30,'연1회':365};
+    const repeat={'매주':7,'매월':30,'분기1회':91,'반기1회':182,'연1회':365};
     const t=(s.tasks||[]).find(t=>t.id===id);
     if(!t) return;
     const step=repeat[t.type]||(t.type==='N일'?(t.cycle||30):0);
@@ -816,7 +819,6 @@ JSON만 출력. 형식: {"tasks":[{"name":string,"due":"YYYY-MM-DD"|null,"done":
       due:f.dueIso||dateFromOffset(3),
       progress:isProg?f.progress:null,
       done:false,
-      cycle:f.type==='N일'?30:f.type==='매주'?7:f.type==='매월'?30:f.type==='연1회'?365:undefined,
     });
     setDoc(doc(db,'tasks',f.editingId||('t'+Date.now())),body).catch(console.error);
     upd({addOpen:false});
@@ -1232,7 +1234,7 @@ JSON만 출력. 형식: {"tasks":[{"name":string,"due":"YYYY-MM-DD"|null,"done":
                               <div style={{fontSize:14,fontWeight:600,color:'#1C212B',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{t.name}</div>
                               {t.note&&<div style={{fontSize:12,color:'#8A929E',marginTop:3,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>📝 {t.note}</div>}
                             </div>
-                            <span style={{fontSize:11,fontWeight:700,padding:'3px 8px',borderRadius:6,background:chip.bg,color:chip.color,whiteSpace:'nowrap',flexShrink:0}}>{t.type==='N일'?(t.cycle||30)+'일 주기':t.type}</span>
+                            <span style={{fontSize:11,fontWeight:700,padding:'3px 8px',borderRadius:6,background:chip.bg,color:chip.color,whiteSpace:'nowrap',flexShrink:0}}>{t.type==='N일'?(t.cycle||30)+'일 주기':(TYPE_LABEL[t.type]||t.type)}</span>
                             {t.note
                               ?<span style={{fontSize:11,fontWeight:700,color:'#1F8C7A',flexShrink:0}}>특이사항</span>
                               :<span style={{fontSize:11.5,color:'#C4C9D1',flexShrink:0}}>기록 추가</span>}
@@ -1281,7 +1283,8 @@ JSON만 출력. 형식: {"tasks":[{"name":string,"due":"YYYY-MM-DD"|null,"done":
                     <option value="1회성">1회성</option>
                     <option value="매주">매주</option>
                     <option value="매월">매월</option>
-                    <option value="N일">N일 주기</option>
+                    <option value="분기1회">분기 1회</option>
+                    <option value="반기1회">반기 1회</option>
                     <option value="연1회">연 1회</option>
                     <option value="중장기">중장기</option>
                   </select>
