@@ -87,6 +87,11 @@ const CAT_C = {
   '기타':   {c:'#5B6472',bg:'#EEF0F3'},
 };
 const COLLAPSE_N = 5;
+function STATUS_BADGE(status){
+  if(status==='완료됨') return {bg:'#EDEFF2',c:'#8A929E'};
+  if(status&&status.indexOf('중복')===0) return {bg:'#F0EAFB',c:'#7A4FD0'};
+  return {bg:'#E3F4F1',c:'#1F8C7A'}; // 신규
+}
 const STOP = new Set(['일일보고','일일 보고','주간보고','주간 보고','업무보고','업무 보고','오전','오후','특이사항','보고','금일','명일','구분','업무내용','진행사항','비고','날짜','내용']);
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -394,6 +399,9 @@ function App(){
     captureError:'',
     capturePreview:null,
     captureDrag:false,
+    noteOpen:false,
+    noteId:null,
+    noteText:'',
     expanded:{},
     addTab:'direct',
     pasteMonth:new Date().getMonth()+1,
@@ -605,14 +613,15 @@ JSON만 출력. 형식: {"tasks":[{"name":string,"due":"YYYY-MM-DD"|null,"done":
       let parsed; try{ parsed=JSON.parse(out); }catch(_){ throw new Error('인식 결과를 해석하지 못했습니다. 다시 시도해 주세요.'); }
       const items=(parsed&&(parsed.tasks||parsed.items))||[];
       if(!items.length){ upd({captureStep:'upload',captureError:'이미지에서 업무를 찾지 못했습니다. 더 선명한 캡처로 다시 시도해 주세요.'}); return; }
-      const currentTasks=s.tasks||[];
+      const cand=dedupCandidates();
       const rows=items.map(it=>{
         const name=(it.name||'').trim();
         const hasDue=it.due&&/^\d{4}-\d{2}-\d{2}$/.test(it.due);
         const dueIso=hasDue?it.due:dateFromOffset(7);
-        const dup=findExisting(name,currentTasks);
-        return {include:!it.done&&!dup,name,dueIso,done:!!it.done,memo:(it.memo||'').trim(),
-          confidence:hasDue?'normal':'low',status:dup?'중복(갱신)':'신규',type:'1회성',
+        const ex=findExisting(name,cand);
+        const status=ex?(ex.done?'완료됨':'중복(갱신)'):'신규';
+        return {include:!it.done&&!ex,name,dueIso,done:!!it.done,memo:(it.memo||'').trim(),
+          confidence:hasDue?'normal':'low',status,type:'1회성',
           date:hasDue?fmtDate(it.due).slice(0,5):'—'};
       }).filter(r=>r.name);
       if(!rows.length){ upd({captureStep:'upload',captureError:'인식된 업무명이 없습니다.'}); return; }
@@ -670,22 +679,51 @@ JSON만 출력. 형식: {"tasks":[{"name":string,"due":"YYYY-MM-DD"|null,"done":
   // ── Task actions (write to Firestore; UI updates via onSnapshot) ──────────
   function completeTask(id){
     if(!window.__fb) return;
-    const {db,doc,setDoc,deleteDoc}=window.__fb;
+    const {db,doc,setDoc}=window.__fb;
     const repeat={'매주':7,'매월':30,'연1회':365};
     const t=(s.tasks||[]).find(t=>t.id===id);
     if(!t) return;
     const step=repeat[t.type]||(t.type==='N일'?(t.cycle||30):0);
     if(step>0){
+      // 반복 업무: 다음 회차로 이동 (완료 기록 없이 유지)
       const d=new Date(t.due+'T00:00:00');d.setDate(d.getDate()+step);
       setDoc(doc(db,'tasks',id),taskToDoc({...t,due:d.toISOString().slice(0,10)})).catch(console.error);
     } else {
-      deleteDoc(doc(db,'tasks',id)).catch(console.error);
+      // 1회성 업무: 삭제하지 않고 완료 처리 + 완료일 기록 (중복 검증·완료 기록용)
+      setDoc(doc(db,'tasks',id),taskToDoc({...t,done:true,completedAt:dateFromOffset(0),progress:100})).catch(console.error);
     }
+  }
+  function reopenTask(id){
+    if(!window.__fb) return;
+    const {db,doc,setDoc}=window.__fb;
+    const t=(s.tasks||[]).find(t=>t.id===id);
+    if(!t) return;
+    setDoc(doc(db,'tasks',id),taskToDoc({...t,done:false,completedAt:undefined})).catch(console.error);
   }
   function deleteTask(id){
     if(!window.__fb) return;
     const {db,doc,deleteDoc}=window.__fb;
     deleteDoc(doc(db,'tasks',id)).catch(console.error);
+    upd({noteOpen:false});
+  }
+  function openNote(t){ upd({noteOpen:true,noteId:t.id,noteText:t.note||''}); }
+  function saveNote(){
+    if(!window.__fb) return;
+    const {db,doc,setDoc}=window.__fb;
+    const t=(s.tasks||[]).find(t=>t.id===s.noteId);
+    if(!t){ upd({noteOpen:false}); return; }
+    setDoc(doc(db,'tasks',t.id),taskToDoc({...t,note:s.noteText})).catch(console.error);
+    upd({noteOpen:false});
+  }
+  // 중복 검증 대상: 진행 중 업무 + 당월에 완료 처리한 업무
+  function dedupCandidates(){
+    const now=new Date(); const mk=now.getFullYear()+'-'+(now.getMonth()+1);
+    return (s.tasks||[]).filter(t=>{
+      if(!t.done) return true;
+      if(!t.completedAt) return false;
+      const d=new Date(t.completedAt+'T00:00:00');
+      return (d.getFullYear()+'-'+(d.getMonth()+1))===mk;
+    });
   }
   function openAdd(t){
     const reset={addOpen:true,addTab:'direct',pasteStep:'input',pasteText:'',pasteRows:[],pasteMonth:new Date().getMonth()+1};
@@ -786,21 +824,23 @@ JSON만 출력. 형식: {"tasks":[{"name":string,"due":"YYYY-MM-DD"|null,"done":
   function parsePaste(){
     if(!s.pasteText.trim()) return;
     const parsed=parseReport(s.pasteText);
-    const currentTasks=s.tasks||[];
+    const cand=dedupCandidates();
     const rows=parsed.map(r=>{
-      const dup=findExisting(r.name,currentTasks);
-      return{name:r.name,dueIso:r.dueIso,confidence:r.hasDate?'normal':'low',status:dup?'중복(갱신)':'신규',include:!dup,type:'1회성'};
+      const ex=findExisting(r.name,cand);
+      const status=ex?(ex.done?'완료됨':'중복(갱신)'):'신규';
+      return{name:r.name,dueIso:r.dueIso,confidence:r.hasDate?'normal':'low',status,include:!ex,type:'1회성'};
     });
     upd({pasteRows:rows,pasteStep:'preview'});
   }
   function confirmPaste(){
     if(!window.__fb) return;
     const {db,doc,setDoc}=window.__fb;
-    const currentTasks=s.tasks||[];
+    const cand=dedupCandidates();
     s.pasteRows.filter(r=>r.include).forEach(r=>{
-      const ex=findExisting(r.name,currentTasks);
+      const ex=findExisting(r.name,cand);
       if(ex){
-        setDoc(doc(db,'tasks',ex.id),taskToDoc({...ex,due:r.dueIso})).catch(console.error);
+        // 사용자가 중복/완료 항목을 직접 선택한 경우: 기한 갱신 + 다시 진행 상태로
+        setDoc(doc(db,'tasks',ex.id),taskToDoc({...ex,due:r.dueIso,done:false,completedAt:undefined})).catch(console.error);
       } else {
         setDoc(doc(db,'tasks','t'+Date.now()+Math.random().toString(36).slice(2,6)),
           {name:r.name,type:'1회성',importance:'mid',due:r.dueIso,progress:null,done:false}
@@ -812,12 +852,12 @@ JSON만 출력. 형식: {"tasks":[{"name":string,"due":"YYYY-MM-DD"|null,"done":
   function confirmCapture(){
     if(!window.__fb) return;
     const {db,doc,setDoc,deleteDoc}=window.__fb;
-    const currentTasks=s.tasks||[];
+    const cand=dedupCandidates();
     s.captureRows.filter(r=>r.include).forEach(r=>{
-      const ex=findExisting(r.name,currentTasks);
+      const ex=findExisting(r.name,cand);
       if(ex){
-        if(r.done) deleteDoc(doc(db,'tasks',ex.id)).catch(console.error);
-        else setDoc(doc(db,'tasks',ex.id),taskToDoc({...ex,due:r.dueIso})).catch(console.error);
+        if(r.done) setDoc(doc(db,'tasks',ex.id),taskToDoc({...ex,done:true,completedAt:ex.completedAt||dateFromOffset(0),progress:100})).catch(console.error);
+        else setDoc(doc(db,'tasks',ex.id),taskToDoc({...ex,due:r.dueIso,done:false,completedAt:undefined})).catch(console.error);
       } else if(!r.done){
         setDoc(doc(db,'tasks','t'+Date.now()+Math.random().toString(36).slice(2,6)),
           {name:r.name,type:r.type||'1회성',importance:'mid',due:r.dueIso,progress:null,done:false}
@@ -844,6 +884,15 @@ JSON만 출력. 형식: {"tasks":[{"name":string,"due":"YYYY-MM-DD"|null,"done":
     if(!m.done) upcomingMsCol.push({name:m.name,projectName:p.name,proj:p,dateLabel:m.dateLabel,ddayText:m.ddayText,ddayColor:m.ddayColor,_dd:ddayOf(m.date)});
   }));
   upcomingMsCol.sort((a,b)=>a._dd-b._dd);
+  // 완료 업무 (완료일 내림차순, 완료일별 그룹)
+  const completedTasks=(s.tasks||[]).filter(t=>t.done).sort((a,b)=>(b.completedAt||'').localeCompare(a.completedAt||''));
+  const completedGroups=[];
+  completedTasks.forEach(t=>{
+    const k=t.completedAt||'날짜 미상';
+    let g=completedGroups.find(x=>x.key===k);
+    if(!g){ g={key:k,label:t.completedAt?fmtDate(t.completedAt):'완료일 미상',items:[]}; completedGroups.push(g); }
+    g.items.push(t);
+  });
   const overdue=active.filter(t=>t.dday<0).map(t=>({name:t.name,sub:t.chipLabel+' · 기한 '+t.dateLabel,dday:t.ddayText}));
   const todayDueList=active.filter(t=>t.dday===0).map(t=>({name:t.name,sub:t.chipLabel+' · 오늘 마감'}));
   const upcomingMs=[];
@@ -854,6 +903,7 @@ JSON만 출력. 형식: {"tasks":[{"name":string,"due":"YYYY-MM-DD"|null,"done":
   const todayLabel=(td.getMonth()+1)+'월 '+td.getDate()+'일';
   const f=s.addForm;
   const mp=s.manageOpen?rawProject(s.manageId):null;
+  const noteTask=s.noteOpen?(s.tasks||[]).find(t=>t.id===s.noteId):null;
 
   // ── Render ──────────────────────────────────────────────────────────────
   return (
@@ -942,8 +992,8 @@ JSON만 출력. 형식: {"tasks":[{"name":string,"due":"YYYY-MM-DD"|null,"done":
       <div style={{background:'#fff',borderBottom:'1px solid #ECEEF1'}}>
         <div style={{maxWidth:2120,margin:'0 auto',padding:'0 clamp(20px,4vw,64px)',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
           <div style={{display:'flex',gap:4}}>
-            {[{key:'board',label:'오늘 보드'},{key:'longterm',label:'중장기 관리'}].map(({key,label})=>(
-              <button key={key} className="tab-btn" onClick={()=>upd({view:key})} style={{position:'relative',padding:'16px 4px',marginRight:key==='board'?24:0,border:'none',background:'none',cursor:'pointer',fontSize:14.5,fontWeight:s.view===key?700:500,color:s.view===key?'#1C212B':'#8A929E',transition:'color .12s'}}>
+            {[{key:'board',label:'오늘 보드'},{key:'longterm',label:'중장기 관리'},{key:'done',label:'완료 업무'}].map(({key,label})=>(
+              <button key={key} className="tab-btn" onClick={()=>upd({view:key})} style={{position:'relative',padding:'16px 4px',marginRight:key==='done'?0:24,border:'none',background:'none',cursor:'pointer',fontSize:14.5,fontWeight:s.view===key?700:500,color:s.view===key?'#1C212B':'#8A929E',transition:'color .12s'}}>
                 {label}
                 <span style={{position:'absolute',left:0,right:0,bottom:0,height:3,borderRadius:'3px 3px 0 0',background:s.view===key?'#101012':'transparent',transition:'background .12s'}}></span>
               </button>
@@ -1147,6 +1197,57 @@ JSON만 출력. 형식: {"tasks":[{"name":string,"due":"YYYY-MM-DD"|null,"done":
         </main>
       )}
 
+      {/* ─── COMPLETED VIEW ─── */}
+      {!isLoading&&s.view==='done'&&(
+        <main style={{maxWidth:2120,margin:'0 auto',padding:'28px clamp(20px,4vw,64px) 64px'}}>
+          <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:20}}>
+            <div style={{fontSize:13,fontWeight:600,color:'#8A929E'}}>완료한 업무 {completedTasks.length}건</div>
+            <div style={{fontSize:12,color:'#A4ABB5'}}>업무를 클릭하면 특이사항을 기록할 수 있습니다</div>
+          </div>
+          {completedTasks.length===0?(
+            <div style={{textAlign:'center',padding:'72px 24px',color:'#A4ABB5'}}>
+              <div style={{width:56,height:56,margin:'0 auto 16px',borderRadius:16,border:'1.5px dashed #D9DDE3',display:'flex',alignItems:'center',justifyContent:'center',color:'#C4C9D1'}}>
+                <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round"><path d="M20 6 9 17l-5-5"/></svg>
+              </div>
+              <div style={{fontSize:14,fontWeight:600,marginBottom:6}}>완료한 업무가 아직 없습니다</div>
+              <div style={{fontSize:12.5}}>오늘 보드에서 업무를 완료하면 여기에 기록됩니다.</div>
+            </div>
+          ):(
+            <div style={{maxWidth:820,margin:'0 auto',display:'flex',flexDirection:'column',gap:24}}>
+              {completedGroups.map(g=>(
+                <div key={g.key}>
+                  <div style={{display:'flex',alignItems:'center',gap:9,marginBottom:10,padding:'0 2px'}}>
+                    <span style={{width:8,height:8,borderRadius:'50%',background:'#1F8C7A',flexShrink:0}}></span>
+                    <span style={{fontSize:13,fontWeight:700,color:'#1C212B'}}>{g.label}</span>
+                    <span style={{fontSize:11.5,fontWeight:700,color:'#8A929E'}}>{g.items.length}건</span>
+                  </div>
+                  <div style={{display:'flex',flexDirection:'column',gap:8}}>
+                    {g.items.map(t=>{
+                      const chip=TYPE_CHIP[t.type]||TYPE_CHIP['1회성'];
+                      return (
+                        <button key={t.id} onClick={()=>openNote(t)} className="ms-row" style={{textAlign:'left',width:'100%',display:'block',background:'#fff',border:'1px solid #ECEEF1',borderRadius:12,padding:'13px 15px',cursor:'pointer',transition:'border-color .12s,box-shadow .12s'}}>
+                          <div style={{display:'flex',alignItems:'center',gap:10}}>
+                            <span style={{width:20,height:20,borderRadius:'50%',flexShrink:0,background:'#1F8C7A',display:'flex',alignItems:'center',justifyContent:'center',color:'#fff',fontSize:11,fontWeight:700}}>✓</span>
+                            <div style={{flex:1,minWidth:0}}>
+                              <div style={{fontSize:14,fontWeight:600,color:'#1C212B',overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>{t.name}</div>
+                              {t.note&&<div style={{fontSize:12,color:'#8A929E',marginTop:3,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>📝 {t.note}</div>}
+                            </div>
+                            <span style={{fontSize:11,fontWeight:700,padding:'3px 8px',borderRadius:6,background:chip.bg,color:chip.color,whiteSpace:'nowrap',flexShrink:0}}>{t.type==='N일'?(t.cycle||30)+'일 주기':t.type}</span>
+                            {t.note
+                              ?<span style={{fontSize:11,fontWeight:700,color:'#1F8C7A',flexShrink:0}}>특이사항</span>
+                              :<span style={{fontSize:11.5,color:'#C4C9D1',flexShrink:0}}>기록 추가</span>}
+                          </div>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+        </main>
+      )}
+
       {/* ─── ADD / EDIT MODAL ─── */}
       {s.addOpen&&(
         <div onClick={()=>upd({addOpen:false})} style={{position:'fixed',inset:0,zIndex:80,background:'rgba(16,18,20,.42)',display:'flex',alignItems:'center',justifyContent:'center',padding:24,animation:'fade .14s ease'}}>
@@ -1264,7 +1365,7 @@ JSON만 출력. 형식: {"tasks":[{"name":string,"due":"YYYY-MM-DD"|null,"done":
                     <div style={{flex:1,overflow:'auto',padding:'16px 26px 8px'}}>
                       <div style={{display:'flex',alignItems:'center',gap:14,marginBottom:12,fontSize:12.5,color:'#8A929E',flexWrap:'wrap'}}>
                         <span style={{fontWeight:700,color:'#1C212B'}}>{s.pasteRows.length}건 인식</span>
-                        <span style={{display:'inline-flex',alignItems:'center',gap:5}}><span style={{width:10,height:10,borderRadius:3,background:'#F0EAFB'}}></span>중복 → 자동 제외</span>
+                        <span style={{display:'inline-flex',alignItems:'center',gap:5}}><span style={{width:10,height:10,borderRadius:3,background:'#F0EAFB'}}></span>중복·완료 → 자동 제외</span>
                         <span style={{display:'inline-flex',alignItems:'center',gap:5}}><span style={{width:10,height:10,borderRadius:3,background:'#FFF7F1',border:'1px solid #FAD4C4'}}></span>날짜 미인식 — 확인 필요</span>
                       </div>
                       {s.pasteRows.length===0
@@ -1274,7 +1375,7 @@ JSON만 출력. 형식: {"tasks":[{"name":string,"due":"YYYY-MM-DD"|null,"done":
                             {['등록','업무명','기한','상태'].map((h,i)=><div key={i} style={{padding:'11px '+(i===0?'8px':'10px'),textAlign:i===0?'center':'left'}}>{h}</div>)}
                           </div>
                           {s.pasteRows.map((r,i)=>{
-                            const isDup=r.status.startsWith('중복');
+                            const bd=STATUS_BADGE(r.status);
                             return (
                               <div key={i} style={{display:'grid',gridTemplateColumns:'44px 1fr 96px 110px',borderBottom:'1px solid #F2F3F5',background:r.confidence==='low'?'#FFF7F1':(r.include?'#fff':'#FAFAFB'),alignItems:'center'}}>
                                 <div style={{padding:'10px 8px',display:'flex',justifyContent:'center'}}><input type="checkbox" checked={r.include} onChange={()=>setS(p=>({...p,pasteRows:p.pasteRows.map((row,idx)=>idx===i?{...row,include:!row.include}:row)}))} style={{width:17,height:17,accentColor:'#FF6B4A',cursor:'pointer'}}/></div>
@@ -1285,7 +1386,7 @@ JSON만 출력. 형식: {"tasks":[{"name":string,"due":"YYYY-MM-DD"|null,"done":
                                     :<span style={{color:'#5B6472'}}>{fmtDate(r.dueIso)}</span>
                                   }
                                 </div>
-                                <div style={{padding:10}}><span style={{fontSize:11,fontWeight:700,padding:'3px 9px',borderRadius:6,background:isDup?'#F0EAFB':'#E3F4F1',color:isDup?'#7A4FD0':'#1F8C7A'}}>{r.status}</span></div>
+                                <div style={{padding:10}}><span style={{fontSize:11,fontWeight:700,padding:'3px 9px',borderRadius:6,background:bd.bg,color:bd.c}}>{r.status}</span></div>
                               </div>
                             );
                           })}
@@ -1366,7 +1467,7 @@ JSON만 출력. 형식: {"tasks":[{"name":string,"due":"YYYY-MM-DD"|null,"done":
                       ))}
                     </div>
                     {s.captureRows.map((r,i)=>{
-                      const isDup=r.status.startsWith('중복');
+                      const bd=STATUS_BADGE(r.status);
                       return (
                         <div key={i} style={{display:'grid',gridTemplateColumns:'44px 84px 1fr 110px 64px 1.3fr 110px',borderBottom:'1px solid #F2F3F5',background:r.confidence==='low'?'#FFF7F1':'#fff',alignItems:'center'}}>
                           <div style={{padding:'10px 8px',display:'flex',justifyContent:'center'}}><input type="checkbox" checked={r.include} onChange={()=>setS(p=>({...p,captureRows:p.captureRows.map((row,idx)=>idx===i?{...row,include:!row.include}:row)}))} style={{width:17,height:17,accentColor:'#FF6B4A',cursor:'pointer'}}/></div>
@@ -1378,7 +1479,7 @@ JSON만 출력. 형식: {"tasks":[{"name":string,"due":"YYYY-MM-DD"|null,"done":
                           <div style={{padding:10,fontSize:12.5,color:'#5B6472'}}>{fmtDate(r.dueIso)}</div>
                           <div style={{padding:10,display:'flex',justifyContent:'center'}}><input type="checkbox" checked={r.done} onChange={()=>setS(p=>({...p,captureRows:p.captureRows.map((row,idx)=>idx===i?{...row,done:!row.done}:row)}))} style={{width:16,height:16,accentColor:'#1F8C7A',cursor:'pointer'}}/></div>
                           <div style={{padding:'7px 8px'}}><input value={r.memo} onChange={e=>{const v=e.target.value;setS(p=>({...p,captureRows:p.captureRows.map((row,idx)=>idx===i?{...row,memo:v}:row)}));}} placeholder="—" style={{width:'100%',height:30,padding:'0 8px',borderRadius:7,border:'1px solid #E5E8EC',fontSize:12.5,background:'#fff'}}/></div>
-                          <div style={{padding:10}}><span style={{fontSize:11,fontWeight:700,padding:'3px 9px',borderRadius:6,background:isDup?'#F0EAFB':'#E3F4F1',color:isDup?'#7A4FD0':'#1F8C7A'}}>{r.status}</span></div>
+                          <div style={{padding:10}}><span style={{fontSize:11,fontWeight:700,padding:'3px 9px',borderRadius:6,background:bd.bg,color:bd.c}}>{r.status}</span></div>
                         </div>
                       );
                     })}
@@ -1465,6 +1566,35 @@ JSON만 출력. 형식: {"tasks":[{"name":string,"due":"YYYY-MM-DD"|null,"done":
                 <button onClick={()=>upd({manageOpen:false})} style={{height:42,padding:'0 18px',borderRadius:10,border:'1px solid #E1E4E8',background:'#fff',color:'#5B6472',fontSize:14,fontWeight:600,cursor:'pointer'}}>닫기</button>
                 <button onClick={saveManage} className="btn-coral" style={{height:42,padding:'0 24px',borderRadius:10,border:'none',background:'#FF6B4A',color:'#fff',fontSize:14,fontWeight:700,cursor:'pointer'}}>저장</button>
               </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ─── COMPLETED-TASK NOTE MODAL ─── */}
+      {s.noteOpen&&noteTask&&(
+        <div onClick={()=>upd({noteOpen:false})} style={{position:'fixed',inset:0,zIndex:80,background:'rgba(16,18,20,.42)',display:'flex',alignItems:'center',justifyContent:'center',padding:24,animation:'fade .14s ease'}}>
+          <div onClick={e=>e.stopPropagation()} style={{width:520,maxWidth:'100%',maxHeight:'88vh',display:'flex',flexDirection:'column',background:'#fff',borderRadius:18,boxShadow:'0 24px 60px -12px rgba(16,18,20,.4)',animation:'pop .16s ease',overflow:'hidden'}}>
+            <div style={{padding:'22px 26px 16px',borderBottom:'1px solid #F0F2F4',display:'flex',alignItems:'flex-start',justifyContent:'space-between',gap:14}}>
+              <div style={{minWidth:0}}>
+                <div style={{display:'flex',alignItems:'center',gap:7,marginBottom:6}}>
+                  <span style={{width:18,height:18,borderRadius:'50%',flexShrink:0,background:'#1F8C7A',display:'flex',alignItems:'center',justifyContent:'center',color:'#fff',fontSize:10,fontWeight:700}}>✓</span>
+                  <span style={{fontSize:11,fontWeight:700,letterSpacing:.4,color:'#B6BCC6'}}>완료 업무 · {noteTask.completedAt?fmtDate(noteTask.completedAt)+' 완료':'완료'}</span>
+                </div>
+                <div style={{fontSize:16.5,fontWeight:700,lineHeight:1.35}}>{noteTask.name}</div>
+              </div>
+              <button onClick={()=>upd({noteOpen:false})} aria-label="닫기" style={{flexShrink:0,width:30,height:30,borderRadius:8,border:'none',background:'#F4F5F7',color:'#8A929E',cursor:'pointer',fontSize:18,lineHeight:1}}>×</button>
+            </div>
+            <div style={{padding:'18px 26px',overflowY:'auto',flex:1}}>
+              <label style={{display:'block',fontSize:12.5,fontWeight:700,color:'#5B6472',marginBottom:8}}>특이사항 · 수행 기록</label>
+              <textarea value={s.noteText} onChange={e=>upd({noteText:e.target.value})} autoFocus placeholder="업무 수행 중 발생한 특이사항, 결과, 참고할 내용을 기록하세요." style={{width:'100%',height:180,padding:'13px 14px',borderRadius:12,border:'1px solid #E1E4E8',fontSize:13.5,lineHeight:1.6,background:'#FAFBFC',resize:'vertical'}}/>
+            </div>
+            <div style={{padding:'16px 26px 22px',borderTop:'1px solid #F0F2F4',display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+              <div style={{display:'flex',gap:8}}>
+                <button onClick={()=>{reopenTask(noteTask.id);upd({noteOpen:false});}} className="btn-light" style={{height:42,padding:'0 14px',borderRadius:10,border:'1px solid #E1E4E8',background:'#fff',color:'#5B6472',fontSize:13.5,fontWeight:600,cursor:'pointer'}}>진행으로 되돌리기</button>
+                <button onClick={()=>deleteTask(noteTask.id)} className="btn-del" style={{height:42,padding:'0 14px',borderRadius:10,border:'1px solid #F3CFC4',background:'#fff',color:'#D8472A',fontSize:13.5,fontWeight:600,cursor:'pointer'}}>삭제</button>
+              </div>
+              <button onClick={saveNote} className="btn-coral" style={{height:42,padding:'0 24px',borderRadius:10,border:'none',background:'#FF6B4A',color:'#fff',fontSize:14,fontWeight:700,cursor:'pointer'}}>저장</button>
             </div>
           </div>
         </div>
